@@ -8,13 +8,14 @@ import logging
 import os
 import uuid
 import shutil
+import time
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # Disable GPU usage
 import torch
 torch.cuda.is_available = lambda: False
-
+start_time = time.time()
 app = FastAPI()
 
 # Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
@@ -97,6 +98,7 @@ def predict(file: UploadFile = File(...)):
     """
     Predict objects in an image
     """
+    start_time = time.time()
     ext = os.path.splitext(file.filename)[1]
     uid = str(uuid.uuid4())
     original_path = os.path.join(UPLOAD_DIR, uid + ext)
@@ -121,11 +123,14 @@ def predict(file: UploadFile = File(...)):
         bbox = box.xyxy[0].tolist()
         save_detection_object(uid, label, score, bbox)
         detected_labels.append(label)
+        processing_time = round(time.time() - start_time, 2)
 
     return {
         "prediction_uid": uid, 
         "detection_count": len(results[0].boxes),
-        "labels": detected_labels
+        "labels": detected_labels,
+         "time_took": processing_time
+
     }
 
 @app.get("/prediction/{uid}")
@@ -133,6 +138,7 @@ def get_prediction_by_uid(uid: str):
     """
     Get prediction session by uid with all detected objects
     """
+
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         # Get prediction session
@@ -165,7 +171,7 @@ def get_prediction_by_uid(uid: str):
 @app.get("/prediction/{uid}/image")
 def get_prediction_image(uid: str):
     """
-    Return the annotated (bounding-box) image for a prediction
+    Return the annotated (bounding-box) images r a prediction
     """
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
