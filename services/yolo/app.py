@@ -171,7 +171,7 @@ def get_prediction_by_uid(uid: str):
 @app.get("/prediction/{uid}/image")
 def get_prediction_image(uid: str):
     """
-    Return the annotated (bounding-box) image for a prediction
+    Return the annotated (bounding-box) images r a prediction
     """
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
