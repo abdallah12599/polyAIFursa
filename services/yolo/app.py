@@ -182,6 +182,74 @@ def get_prediction_image(uid: str):
     return FileResponse(row[0])
 
 
+@app.get("/predictions/label/{label}")
+def get_predictions_by_label(label: str):
+    """
+    Return all prediction sessions that contain at least one detected object with the given label.
+    """
+    if label == "":
+        raise HTTPException(status_code=400, detail="Label cannot be empty")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        sessions = conn.execute("""
+            SELECT DISTINCT ps.uid, ps.timestamp
+            FROM prediction_sessions ps
+            JOIN detection_objects do_ ON ps.uid = do_.prediction_uid
+            WHERE do_.label = ?
+        """, (label,)).fetchall()
+
+        result = []
+        for session in sessions:
+            objects = conn.execute(
+                "SELECT id, label, score, box FROM detection_objects WHERE prediction_uid = ? AND label = ?",
+                (session["uid"], label)
+            ).fetchall()
+
+            result.append({
+                "uid": session["uid"],
+                "timestamp": session["timestamp"],
+                "detection_objects": [
+                    {
+                        "id": obj["id"],
+                        "label": obj["label"],
+                        "score": obj["score"],
+                        "box": obj["box"]
+                    } for obj in objects
+                ]
+            })
+
+        return result
+
+
+@app.get("/predictions/score/{min_score}")
+def get_predictions_by_score(min_score: float):
+    """
+    Return all detection objects whose confidence score is >= min_score.
+    """
+    if min_score < 0.0 or min_score > 1.0:
+        raise HTTPException(status_code=400, detail="min_score must be between 0.0 and 1.0")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        objects = conn.execute(
+            "SELECT id, prediction_uid, label, score, box FROM detection_objects WHERE score >= ?",
+            (min_score,)
+        ).fetchall()
+
+        return [
+            {
+                "id": obj["id"],
+                "prediction_uid": obj["prediction_uid"],
+                "label": obj["label"],
+                "score": obj["score"],
+                "box": obj["box"]
+            } for obj in objects
+        ]
+
+
 @app.get("/health")
 def health():
     """
