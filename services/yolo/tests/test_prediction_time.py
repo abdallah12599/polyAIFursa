@@ -10,9 +10,14 @@ TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 class TestPredictionTime(unittest.TestCase):
     def setUp(self):
-        _, app_module.DB_PATH = tempfile.mkstemp(suffix=".db")
+        db_fd, app_module.DB_PATH = tempfile.mkstemp(suffix=".db")
+        os.close(db_fd)
         init_db()
-        self.client = TestClient(app)
+        self.client_context = TestClient(app)
+        self.client = self.client_context.__enter__()
+
+    def tearDown(self):
+        self.client_context.__exit__(None, None, None)
 
     def test_predict_includes_processing_time(self):
         with open(TEST_IMAGE, "rb") as f:

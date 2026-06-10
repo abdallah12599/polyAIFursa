@@ -1,5 +1,7 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from ultralytics import YOLO
 from PIL import Image
@@ -10,27 +12,19 @@ import uuid
 import shutil
 import time
 
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # Disable GPU usage
 import torch
 torch.cuda.is_available = lambda: False
 start_time = time.time()
-app = FastAPI()
-
-# Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
-Instrumentator().instrument(app).expose(app)
 
 # Confidence threshold for object detection (0.0 - 1.0).
 # Detections below this score are discarded.
 # Override with: export CONFIDENCE_THRESHOLD=0.7
-_raw_threshold = os.environ.get("CONFIDENCE_THRESHOLD")
-if _raw_threshold is not None:
-    CONFIDENCE_THRESHOLD = float(_raw_threshold)
-    logging.info(f"CONFIDENCE_THRESHOLD set to {CONFIDENCE_THRESHOLD} (from environment)")
-else:
-    CONFIDENCE_THRESHOLD = 0.5
-    logging.info(f"CONFIDENCE_THRESHOLD not set, using default: {CONFIDENCE_THRESHOLD}")
+CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", 0.5))
+logging.info(f"CONFIDENCE_THRESHOLD set to {CONFIDENCE_THRESHOLD}")
 
 UPLOAD_DIR = "uploads/original"
 PREDICTED_DIR = "uploads/predicted"
@@ -71,6 +65,22 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prediction_uid ON detection_objects (prediction_uid)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_label ON detection_objects (label)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_score ON detection_objects (score)")
+
+
+@asynccontextmanager
+async def lifespan(_app):  # pragma: no cover
+    """
+    Initialize the database when the app starts with uvicorn app:app.
+    """
+    init_db()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+# Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
+Instrumentator().instrument(app).expose(app)
+
 
 
 def save_prediction_session(uid, original_image, predicted_image):
@@ -123,7 +133,8 @@ def predict(file: UploadFile = File(...)):
         bbox = box.xyxy[0].tolist()
         save_detection_object(uid, label, score, bbox)
         detected_labels.append(label)
-        processing_time = round(time.time() - start_time, 2)
+
+    processing_time = round(time.time() - start_time, 2)
 
     return {
         "prediction_uid": uid, 
@@ -182,6 +193,76 @@ def get_prediction_image(uid: str):
     return FileResponse(row[0])
 
 
+@app.get("/predictions/label/{label}")
+def get_predictions_by_label(label: str):
+    """
+    Get all prediction sessions that contain at least one detected object
+    with the given label (e.g. "person", "car").
+    """
+    # A label made up of only whitespace (or empty) is not a valid query.
+    if not label.strip():
+        raise HTTPException(status_code=400, detail="Label cannot be empty")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        # Find every session that has at least one object with this label.
+        sessions = conn.execute("""
+            SELECT DISTINCT prediction_sessions.uid, prediction_sessions.timestamp
+            FROM prediction_sessions
+            JOIN detection_objects
+                ON prediction_sessions.uid = detection_objects.prediction_uid
+            WHERE detection_objects.label = ?
+        """, (label,)).fetchall()
+
+        results = []
+        for session in sessions:
+            objects = conn.execute(
+                "SELECT * FROM detection_objects WHERE prediction_uid = ?",
+                (session["uid"],)
+            ).fetchall()
+            results.append({
+                "uid": session["uid"],
+                "timestamp": session["timestamp"],
+                "detection_objects": [
+                    {
+                        "id": obj["id"],
+                        "label": obj["label"],
+                        "score": obj["score"],
+                        "box": obj["box"]
+                    } for obj in objects
+                ]
+            })
+        return results
+
+
+@app.get("/predictions/score/{min_score}")
+def get_detections_by_score(min_score: float):
+    """
+    Get all detection objects whose confidence score is greater than or
+    equal to min_score (a float between 0.0 and 1.0).
+    """
+    if min_score < 0.0 or min_score > 1.0:
+        raise HTTPException(status_code=400, detail="min_score must be between 0.0 and 1.0")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        objects = conn.execute(
+            "SELECT * FROM detection_objects WHERE score >= ?",
+            (min_score,)
+        ).fetchall()
+
+        return [
+            {
+                "id": obj["id"],
+                "prediction_uid": obj["prediction_uid"],
+                "label": obj["label"],
+                "score": obj["score"],
+                "box": obj["box"]
+            } for obj in objects
+        ]
+
+
 @app.get("/health")
 def health():
     """
@@ -189,7 +270,7 @@ def health():
     """
     return {"status": "ok"}
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
     init_db()
