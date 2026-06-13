@@ -67,7 +67,7 @@ def init_db():
 
 app = FastAPI()
 
-# Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
+# Expose /metrics endpoints with default process metrics + FastAPI HTTP metrics
 Instrumentator().instrument(app).expose(app)
 
 init_db()
