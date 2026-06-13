@@ -25,8 +25,7 @@ def setup_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client():
-    with TestClient(app) as test_client:
-        yield test_client
+    return TestClient(app)
 
 
 def _seed_session(uid, original=None, predicted=None, objects=None):

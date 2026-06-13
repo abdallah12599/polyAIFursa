@@ -13,11 +13,7 @@ class TestPredictionTime(unittest.TestCase):
         db_fd, app_module.DB_PATH = tempfile.mkstemp(suffix=".db")
         os.close(db_fd)
         init_db()
-        self.client_context = TestClient(app)
-        self.client = self.client_context.__enter__()
-
-    def tearDown(self):
-        self.client_context.__exit__(None, None, None)
+        self.client = TestClient(app)
 
     def test_predict_includes_processing_time(self):
         with open(TEST_IMAGE, "rb") as f:

@@ -1,5 +1,3 @@
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -67,19 +65,12 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_score ON detection_objects (score)")
 
 
-@asynccontextmanager
-async def lifespan(_app):  # pragma: no cover
-    """
-    Initialize the database when the app starts with uvicorn app:app.
-    """
-    init_db()
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 # Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
 Instrumentator().instrument(app).expose(app)
+
+init_db()
 
 
 
@@ -140,7 +131,7 @@ def predict(file: UploadFile = File(...)):
         "prediction_uid": uid, 
         "detection_count": len(results[0].boxes),
         "labels": detected_labels,
-         "time_took": processing_time
+        "time_took": processing_time
 
     }
 
@@ -270,7 +261,7 @@ def health():
     """
     return {"status": "ok"}
 
-if __name__ == "__main__":  # pragma: no covers
+if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
     init_db()

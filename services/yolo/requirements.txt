@@ -1,5 +1,5 @@
 # FastAPI and Uvicorn (for web API)
-fastapi>=0.95.0
+fastapi>=0.115.0
 uvicorn>=0.21.1
 httpx>=0.28.1
 
