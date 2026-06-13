@@ -10,7 +10,8 @@ TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 class TestPredictionTime(unittest.TestCase):
     def setUp(self):
-        _, app_module.DB_PATH = tempfile.mkstemp(suffix=".db")
+        db_fd, app_module.DB_PATH = tempfile.mkstemp(suffix=".db")
+        os.close(db_fd)
         init_db()
         self.client = TestClient(app)
 
