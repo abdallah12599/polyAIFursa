@@ -9,9 +9,16 @@ import os
 import uuid
 import shutil
 import time
+import signal
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+def handle_shutdown(signum, frame):
+    logging.info("Graceful shutdown requested. Cleaning up before exit...")
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, handle_shutdown)
+signal.signal(signal.SIGINT, handle_shutdown)
 
 # Disable GPU usage
 import torch
