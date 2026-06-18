@@ -21,6 +21,9 @@ jobs:
           script: |
             cd ~/polyAIFursa
             git pull origin dev
+            source.venv/bin/activaye
+            pip install -r services/yolo/torch-requirements.txt
+            pip install -r services/yolo/requirements.txt
             sudo systemctl restart yolo.service
             sudo systemctl status yolo.service --no-pager
 
@@ -38,5 +41,8 @@ jobs:
           script: |
             cd ~/polyAIFursa
             git pull origin main
+            source.venv/bin/activaye
+            pip install -r services/yolo/torch-requirements.txt
+            pip install -r services/yolo/requirements.txt
             sudo systemctl restart yolo.service
             sudo systemctl status yolo.service --no-pager
