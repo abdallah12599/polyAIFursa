@@ -266,7 +266,7 @@ def health():
     """
     Health check endpoint
     """
-    return {"status": "ok"}
+    return {"status": "ok"} #
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
