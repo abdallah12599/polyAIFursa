@@ -73,9 +73,6 @@ def init_db():
 
 
 app = FastAPI()
-@app.on_event("shutdown")
-def shutdown_event():
-    logging.info("Graceful shutdown requested. Cleaning up before exit...")
 
 # Expose /metrics endpoints with default process metrics + FastAPI HTTP metrics
 Instrumentator().instrument(app).expose(app)
@@ -270,6 +267,14 @@ def health():
     Health check endpoint
     """
     return {"status": "ok"}
+
+@app.get("/health2")
+def health2():
+    """
+    Health2 check endpoint
+    """
+    return {"status": "ok"}
+
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
