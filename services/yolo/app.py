@@ -1,5 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from typing import List
+from datetime import datetime
 from prometheus_fastapi_instrumentator import Instrumentator
 from ultralytics import YOLO
 from PIL import Image
@@ -78,6 +81,18 @@ app = FastAPI()
 Instrumentator().instrument(app).expose(app)
 
 init_db()
+class DetectionObject(BaseModel):
+    id: int
+    label: str
+    score: float
+    box: list[float]
+
+
+class PredictionResponse(BaseModel):
+    prediction_uid: str
+    detection_count: int
+    labels: List[str]
+    time_took: float
 
 
 
@@ -101,7 +116,7 @@ def save_detection_object(prediction_uid, label, score, box):
             VALUES (?, ?, ?, ?)
         """, (prediction_uid, label, score, str(box)))
 
-@app.post("/predict")
+@app.post("/predict", response_model=PredictionResponse)
 def predict(file: UploadFile = File(...)):
     """
     Predict objects in an image
@@ -134,13 +149,12 @@ def predict(file: UploadFile = File(...)):
 
     processing_time = round(time.time() - start_time, 2)
 
-    return {
-        "prediction_uid": uid, 
-        "detection_count": len(results[0].boxes),
-        "labels": detected_labels,
-        "time_took": processing_time
-
-    }
+    return PredictionResponse(
+    prediction_uid=uid,
+    detection_count=len(results[0].boxes),
+    labels=detected_labels,
+    time_took=processing_time
+    )
 
 @app.get("/prediction/{uid}")
 def get_prediction_by_uid(uid: str):

@@ -5,6 +5,7 @@ import logging
 import os
 from contextvars import ContextVar
 from typing import Optional
+import time
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -31,6 +32,8 @@ MODEL = os.environ.get("MODEL")
 ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
     "anthropic:claude-haiku-4-5",
+    "google_genai:gemini-2.5-flash"
+     
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -69,10 +72,10 @@ TOOLS = {
     detect_objects.name: detect_objects
 }
 
-llm = init_chat_model(MODEL, temperature=0)
+llm = init_chat_model(MODEL)
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
-def run_agent(history: list) -> str:
+def run_agent(history: list, max_iterations: int = 10) -> str:
     """
     Simple ReAct loop:
       1. Send messages to the LLM.
@@ -80,21 +83,31 @@ def run_agent(history: list) -> str:
       3. Repeat until the LLM returns a plain text response.
     """
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
+    iterations = 0
 
     while True:
+        iterations += 1
+
+        if iterations > max_iterations:
+            return "Maximum iterations reached."
+
         response: AIMessage = llm_with_tools.invoke(messages)
         messages.append(response)
 
-        # No tool calls, the model produced its final answer
         if not response.tool_calls:
-            return response.content
+            content = response.content
+            if isinstance(content, list):
+                content = "".join(
+                    block["text"]
+                    for block in content
+                    if block.get("type") == "text"
+                )
+            return content
 
-        # Execute every tool the model requested
         for tool_call in response.tool_calls:
             tool_fn = TOOLS[tool_call["name"]]
-            tool_result = tool_fn.invoke(tool_call)          # returns a ToolMessage
+            tool_result = tool_fn.invoke(tool_call)
             messages.append(tool_result)
-
 
 app = FastAPI(title="Vision Agent")
 
@@ -118,6 +131,12 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    prediction_id: Optional[str] = None
+    annotated_image: Optional[str] = None
+    agent_loop_time_s: Optional[float] = None
+    iterations: Optional[int] = None
+    tools_called: list[str] = []
+    context_limit_exceeded: bool = False
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -128,7 +147,7 @@ def chat(request: ChatRequest):
     for msg in request.messages:
         if msg.role == "user":
             if msg.image_base64:
-                latest_image = msg.image_base64          # saved for detect_objects tool
+                latest_image = msg.image_base64          #) saved for detect_objects tool
                 content = msg.content + "\n[An image was uploaded. Use existing tools to analyze it according to user instructions.]"
             else:
                 content = msg.content
@@ -136,9 +155,17 @@ def chat(request: ChatRequest):
         else:
             lc_messages.append(AIMessage(content=msg.content))
 
+    start_time = time.time()
+
     token = _current_image_b64.set(latest_image)
     try:
-        return ChatResponse(response=run_agent(lc_messages))
+        agent_response = run_agent(lc_messages)
+        agent_loop_time_s = round(time.time() - start_time, 2)
+
+        return ChatResponse(
+            response=agent_response,
+            agent_loop_time_s=agent_loop_time_s,
+        )
     finally:
         _current_image_b64.reset(token)
 
