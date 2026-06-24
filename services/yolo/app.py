@@ -1,9 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import List
-from datetime import datetime
 from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel, Field
 from ultralytics import YOLO
 from PIL import Image
 import sqlite3
@@ -75,25 +73,20 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_score ON detection_objects (score)")
 
 
+class PredictResponse(BaseModel):
+    """Validated shape of the /predict response."""
+    prediction_uid: str = Field(..., description="Unique id of this prediction session")
+    detection_count: int = Field(..., ge=0, description="Number of objects detected")
+    labels: list[str] = Field(default_factory=list, description="Detected object labels")
+    time_took: float = Field(..., ge=0, description="Inference time in seconds")
+
+
 app = FastAPI()
 
 # Expose /metrics endpoints with default process metrics + FastAPI HTTP metrics
 Instrumentator().instrument(app).expose(app)
 
 init_db()
-class DetectionObject(BaseModel):
-    id: int
-    label: str
-    score: float
-    box: list[float]
-
-
-class PredictionResponse(BaseModel):
-    prediction_uid: str
-    detection_count: int
-    labels: List[str]
-    time_took: float
-
 
 
 def save_prediction_session(uid, original_image, predicted_image):
@@ -116,7 +109,7 @@ def save_detection_object(prediction_uid, label, score, box):
             VALUES (?, ?, ?, ?)
         """, (prediction_uid, label, score, str(box)))
 
-@app.post("/predict", response_model=PredictionResponse)
+@app.post("/predict", response_model=PredictResponse)
 def predict(file: UploadFile = File(...)):
     """
     Predict objects in an image
@@ -149,11 +142,11 @@ def predict(file: UploadFile = File(...)):
 
     processing_time = round(time.time() - start_time, 2)
 
-    return PredictionResponse(
-    prediction_uid=uid,
-    detection_count=len(results[0].boxes),
-    labels=detected_labels,
-    time_took=processing_time
+    return PredictResponse(
+        prediction_uid=uid,
+        detection_count=len(results[0].boxes),
+        labels=detected_labels,
+        time_took=processing_time,
     )
 
 @app.get("/prediction/{uid}")
@@ -280,7 +273,7 @@ def health():
     """
     Health check endpoint
     """
-    return {"status": "ok"} #
+    return {"status": "ok"}
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn

@@ -1,0 +1,15 @@
+[Unit]
+Description=PolyAI YOLO object-detection service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/polyAIFursa/services/yolo
+ExecStart=/home/ubuntu/polyAIFursa/.venv/bin/python app.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
