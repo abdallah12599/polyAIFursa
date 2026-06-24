@@ -89,10 +89,39 @@ Response:
 
 ```json
 {
-  "response": "string"
+  "response": "string",
+  "prediction_id": "a1b2c3... or null",
+  "annotated_image": "<base64 JPEG> or null",
+  "agent_loop_time_s": 1.84,
+  "iterations": 2,
+  "tools_called": ["detect_objects"],
+  "context_limit_exceeded": false,
+  "tokens_used": { "input": 312, "output": 22, "total": 334 }
 }
 ```
+
+`annotated_image` is the YOLO bounding-box image (base64) and is populated
+whenever a detection ran during the request.
 
 ### `GET /health`
 
 Returns `{"status": "ok"}` when the service is running.
+
+## Capability checks & rate limiting
+
+On startup the service validates the selected `MODEL` against its
+[model profile](https://github.com/sst/models.dev): it requires `tool_calling`
+and `structured_output`, and reads `max_input_tokens` to flag requests that
+approach the context window (`context_limit_exceeded`). A LangChain
+`InMemoryRateLimiter` (~0.5 req/s, burst 5) throttles calls so we stay under
+provider rate limits.
+
+## Testing
+
+No real LLM or YOLO calls are made (the loop and tools are mocked):
+
+```bash
+cd services/agent
+pip install -r requirements.txt
+pytest tests/ -v
+```
