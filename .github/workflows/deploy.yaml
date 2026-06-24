@@ -1,4 +1,4 @@
-name: Deploy Yolo
+name: Deploy PolyAI
 
 on:
   push:
@@ -18,14 +18,38 @@ jobs:
           host: ${{ secrets.DEV_INSTANCE_IP }}
           username: ubuntu
           key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
+          envs: AGENT_PUBLIC_URL
           script: |
+            set -e
+            AGENT_PUBLIC_URL="${AGENT_PUBLIC_URL:-http://localhost:8000}"
             cd ~/polyAIFursa
             git pull origin dev
-            source.venv/bin/activaye
+
+            # Python venv (shared by yolo + agent)
+            python3 -m venv .venv || true
+            source .venv/bin/activate
+            pip install --upgrade pip
             pip install -r services/yolo/torch-requirements.txt
             pip install -r services/yolo/requirements.txt
-            sudo systemctl restart yolo.service
-            sudo systemctl status yolo.service --no-pager
+            pip install -r services/agent/requirements.txt
+            deactivate
+
+            # Frontend build
+            cd services/frontend
+            npm ci
+            NEXT_PUBLIC_AGENT_URL="$AGENT_PUBLIC_URL" npm run build
+            cd ~/polyAIFursa
+
+            # Install / refresh systemd units and (re)start all services
+            sudo cp deploy/systemd/yolo.service /etc/systemd/system/yolo.service
+            sudo cp deploy/systemd/agent.service /etc/systemd/system/agent.service
+            sudo cp deploy/systemd/frontend.service /etc/systemd/system/frontend.service
+            sudo systemctl daemon-reload
+            sudo systemctl enable yolo.service agent.service frontend.service
+            sudo systemctl restart yolo.service agent.service frontend.service
+            sudo systemctl status yolo.service agent.service frontend.service --no-pager
+        env:
+          AGENT_PUBLIC_URL: ${{ secrets.DEV_AGENT_PUBLIC_URL }}
 
   deploy-prod:
     if: github.ref == 'refs/heads/main'
@@ -38,11 +62,35 @@ jobs:
           host: ${{ secrets.PROD_INSTANCE_IP }}
           username: ubuntu
           key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
+          envs: AGENT_PUBLIC_URL
           script: |
+            set -e
+            AGENT_PUBLIC_URL="${AGENT_PUBLIC_URL:-http://localhost:8000}"
             cd ~/polyAIFursa
             git pull origin main
-            source.venv/bin/activaye
+
+            # Python venv (shared by yolo + agent)
+            python3 -m venv .venv || true
+            source .venv/bin/activate
+            pip install --upgrade pip
             pip install -r services/yolo/torch-requirements.txt
             pip install -r services/yolo/requirements.txt
-            sudo systemctl restart yolo.service
-            sudo systemctl status yolo.service --no-pager
+            pip install -r services/agent/requirements.txt
+            deactivate
+
+            # Frontend build
+            cd services/frontend
+            npm ci
+            NEXT_PUBLIC_AGENT_URL="$AGENT_PUBLIC_URL" npm run build
+            cd ~/polyAIFursa
+
+            # Install / refresh systemd units and (re)start all services
+            sudo cp deploy/systemd/yolo.service /etc/systemd/system/yolo.service
+            sudo cp deploy/systemd/agent.service /etc/systemd/system/agent.service
+            sudo cp deploy/systemd/frontend.service /etc/systemd/system/frontend.service
+            sudo systemctl daemon-reload
+            sudo systemctl enable yolo.service agent.service frontend.service
+            sudo systemctl restart yolo.service agent.service frontend.service
+            sudo systemctl status yolo.service agent.service frontend.service --no-pager
+        env:
+          AGENT_PUBLIC_URL: ${{ secrets.PROD_AGENT_PUBLIC_URL }}

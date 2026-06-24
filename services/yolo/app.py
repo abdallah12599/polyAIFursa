@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel, Field
 from ultralytics import YOLO
 from PIL import Image
 import sqlite3
@@ -72,6 +73,14 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_score ON detection_objects (score)")
 
 
+class PredictResponse(BaseModel):
+    """Validated shape of the /predict response."""
+    prediction_uid: str = Field(..., description="Unique id of this prediction session")
+    detection_count: int = Field(..., ge=0, description="Number of objects detected")
+    labels: list[str] = Field(default_factory=list, description="Detected object labels")
+    time_took: float = Field(..., ge=0, description="Inference time in seconds")
+
+
 app = FastAPI()
 
 # Expose /metrics endpoints with default process metrics + FastAPI HTTP metrics
@@ -101,7 +110,7 @@ def save_detection_object(prediction_uid, label, score, box):
             VALUES (?, ?, ?, ?)
         """, (prediction_uid, label, score, str(box)))
 
-@app.post("/predict")
+@app.post("/predict", response_model=PredictResponse)
 def predict(file: UploadFile = File(...)):
     """
     Predict objects in an image
@@ -134,13 +143,12 @@ def predict(file: UploadFile = File(...)):
 
     processing_time = round(time.time() - start_time, 2)
 
-    return {
-        "prediction_uid": uid, 
-        "detection_count": len(results[0].boxes),
-        "labels": detected_labels,
-        "time_took": processing_time
-
-    }
+    return PredictResponse(
+        prediction_uid=uid,
+        detection_count=len(results[0].boxes),
+        labels=detected_labels,
+        time_took=processing_time,
+    )
 
 @app.get("/prediction/{uid}")
 def get_prediction_by_uid(uid: str):
