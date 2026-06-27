@@ -31,6 +31,7 @@ MODEL = os.environ.get("MODEL")
 ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
     "anthropic:claude-haiku-4-5",
+    "google_genai:gemini-2.5-flash",
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -72,6 +73,27 @@ TOOLS = {
 llm = init_chat_model(MODEL, temperature=0)
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
+def content_to_text(content) -> str:
+    """
+    Normalize an AIMessage's content to a plain string.
+
+    OpenAI and Anthropic return content as a string, but some providers
+    (e.g. google_genai / Gemini) return a list of content blocks like
+    [{"type": "text", "text": "..."}]. ChatResponse expects a string,
+    so flatten any block list down to its text parts.
+    """
+    if isinstance(content, str):
+        return content
+
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict):
+            parts.append(block.get("text", ""))
+    return "".join(parts)
+
+
 def run_agent(history: list) -> str:
     """
     Simple ReAct loop:
@@ -87,7 +109,7 @@ def run_agent(history: list) -> str:
 
         # No tool calls, the model produced its final answer
         if not response.tool_calls:
-            return response.content
+            return content_to_text(response.content)
 
         # Execute every tool the model requested
         for tool_call in response.tool_calls:
