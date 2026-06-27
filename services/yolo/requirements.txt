@@ -13,6 +13,11 @@ opencv-python-headless>=4.7.0
 ultralytics>=8.0.0
 python-multipart>=0.0.6
 
+# Database (ORM data layer)
+SQLAlchemy>=2.0.0
+# PostgreSQL driver (used when DATABASE_URL points to a postgresql:// URL)
+psycopg2-binary>=2.9.0
+
 # Metrics
 prometheus-fastapi-instrumentator>=6.0.0
 

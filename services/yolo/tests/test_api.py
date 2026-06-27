@@ -1,42 +1,23 @@
 import os
 import shutil
 
-import pytest
-from fastapi.testclient import TestClient
-
-os.environ.setdefault("CONFIDENCE_THRESHOLD", "0.5")
-
-from app import (
-    app,
-    init_db,
-    save_prediction_session,
-    save_detection_object,
-)
+from db import PredictionSession, DetectionObject
 
 TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 
-@pytest.fixture(autouse=True)
-def setup_db(tmp_path, monkeypatch):
-    db_file = str(tmp_path / "test_predictions.db")
-    monkeypatch.setattr("app.DB_PATH", db_file)
-    init_db()
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
-
-
-def _seed_session(uid, original=None, predicted=None, objects=None):
+def _seed_session(session_factory, uid, original=None, predicted=None, objects=None):
     """
     Insert a prediction session (and its detection objects) directly into the
     test database so endpoint tests don't have to run the YOLO model.
     objects is a list of (label, score, box) tuples.
     """
-    save_prediction_session(uid, original, predicted)
+    db = session_factory()
+    db.add(PredictionSession(uid=uid, original_image=original, predicted_image=predicted))
     for label, score, box in (objects or []):
-        save_detection_object(uid, label, score, box)
+        db.add(DetectionObject(prediction_uid=uid, label=label, score=score, box=box))
+    db.commit()
+    db.close()
 
 
 def test_health(client):
@@ -58,10 +39,14 @@ def test_predict(client):
     assert "detection_count" in data
     assert "labels" in data
     assert "time_took" in data
+    # FakeModel always returns a single "person" detection.
+    assert data["detection_count"] == 1
+    assert data["labels"] == ["person"]
 
 
-def test_get_prediction_by_uid(client):
+def test_get_prediction_by_uid(client, session_factory):
     _seed_session(
+        session_factory,
         "uid-1",
         original="orig.jpg",
         predicted="pred.jpg",
@@ -72,6 +57,13 @@ def test_get_prediction_by_uid(client):
     assert response.status_code == 200
     data = response.json()
     assert data["uid"] == "uid-1"
+    assert set(data.keys()) == {
+        "uid",
+        "timestamp",
+        "original_image",
+        "predicted_image",
+        "detection_objects",
+    }
     assert len(data["detection_objects"]) == 1
     assert data["detection_objects"][0]["label"] == "person"
 
@@ -82,10 +74,10 @@ def test_get_prediction_by_uid_not_found(client):
     assert response.json()["detail"] == "Prediction not found"
 
 
-def test_get_prediction_image(client, tmp_path):
+def test_get_prediction_image(client, session_factory, tmp_path):
     image_path = str(tmp_path / "pred.jpg")
     shutil.copy(TEST_IMAGE, image_path)
-    _seed_session("uid-img", original="orig.jpg", predicted=image_path)
+    _seed_session(session_factory, "uid-img", original="orig.jpg", predicted=image_path)
 
     response = client.get("/prediction/uid-img/image")
     assert response.status_code == 200
@@ -97,18 +89,18 @@ def test_get_prediction_image_session_not_found(client):
     assert response.json()["detail"] == "Image not found"
 
 
-def test_get_prediction_image_file_missing(client):
+def test_get_prediction_image_file_missing(client, session_factory):
     # Session exists, but the predicted image file is gone from disk.
-    _seed_session("uid-nofile", original="orig.jpg", predicted="/no/such/pred.jpg")
+    _seed_session(session_factory, "uid-nofile", original="orig.jpg", predicted="/no/such/pred.jpg")
 
     response = client.get("/prediction/uid-nofile/image")
     assert response.status_code == 404
     assert response.json()["detail"] == "Image not found"
 
 
-def test_get_predictions_by_label(client):
-    _seed_session("uid-a", objects=[("person", 0.91, "[10, 20, 100, 200]")])
-    _seed_session("uid-b", objects=[("car", 0.70, "[0, 0, 1, 1]")])
+def test_get_predictions_by_label(client, session_factory):
+    _seed_session(session_factory, "uid-a", objects=[("person", 0.91, "[10, 20, 100, 200]")])
+    _seed_session(session_factory, "uid-b", objects=[("car", 0.70, "[0, 0, 1, 1]")])
 
     response = client.get("/predictions/label/person")
     assert response.status_code == 200
@@ -119,8 +111,8 @@ def test_get_predictions_by_label(client):
     assert data[0]["detection_objects"][0]["score"] == 0.91
 
 
-def test_get_predictions_by_label_no_matches(client):
-    _seed_session("uid-a", objects=[("car", 0.70, "[0, 0, 1, 1]")])
+def test_get_predictions_by_label_no_matches(client, session_factory):
+    _seed_session(session_factory, "uid-a", objects=[("car", 0.70, "[0, 0, 1, 1]")])
 
     response = client.get("/predictions/label/person")
     assert response.status_code == 200
@@ -134,8 +126,9 @@ def test_get_predictions_by_label_empty(client):
     assert response.json()["detail"] == "Label cannot be empty"
 
 
-def test_get_detections_by_score(client):
+def test_get_detections_by_score(client, session_factory):
     _seed_session(
+        session_factory,
         "uid-a",
         objects=[
             ("person", 0.91, "[10, 20, 100, 200]"),
@@ -152,8 +145,8 @@ def test_get_detections_by_score(client):
     assert data[0]["score"] == 0.91
 
 
-def test_get_detections_by_score_no_matches(client):
-    _seed_session("uid-a", objects=[("cat", 0.30, "[0, 0, 1, 1]")])
+def test_get_detections_by_score_no_matches(client, session_factory):
+    _seed_session(session_factory, "uid-a", objects=[("cat", 0.30, "[0, 0, 1, 1]")])
 
     response = client.get("/predictions/score/0.9")
     assert response.status_code == 200
