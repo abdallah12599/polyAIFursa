@@ -207,6 +207,74 @@ def get_detections_by_score(min_score: float, db: Session = Depends(get_db)):
     ]
 
 
+@app.get("/predictions/label/{label}")
+def get_predictions_by_label(label: str):
+    """
+    Get all prediction sessions that contain at least one detected object
+    with the given label (e.g. "person", "car").
+    """
+    if not label.strip():
+        raise HTTPException(status_code=400, detail="Label cannot be empty")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        sessions = conn.execute("""
+            SELECT DISTINCT prediction_sessions.uid, prediction_sessions.timestamp
+            FROM prediction_sessions
+            JOIN detection_objects
+                ON prediction_sessions.uid = detection_objects.prediction_uid
+            WHERE detection_objects.label = ?
+        """, (label,)).fetchall()
+
+        results = []
+        for session in sessions:
+            objects = conn.execute(
+                "SELECT * FROM detection_objects WHERE prediction_uid = ? AND label = ?",
+                (session["uid"], label)
+            ).fetchall()
+            results.append({
+                "uid": session["uid"],
+                "timestamp": session["timestamp"],
+                "detection_objects": [
+                    {
+                        "id": obj["id"],
+                        "label": obj["label"],
+                        "score": obj["score"],
+                        "box": obj["box"]
+                    } for obj in objects
+                ]
+            })
+        return results
+
+
+@app.get("/predictions/score/{min_score}")
+def get_detections_by_score(min_score: float):
+    """
+    Get all detection objects whose confidence score is greater than or
+    equal to min_score (a float between 0.0 and 1.0).
+    """
+    if min_score < 0.0 or min_score > 1.0:
+        raise HTTPException(status_code=400, detail="min_score must be between 0.0 and 1.0")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        objects = conn.execute(
+            "SELECT * FROM detection_objects WHERE score >= ?",
+            (min_score,)
+        ).fetchall()
+
+        return [
+            {
+                "id": obj["id"],
+                "prediction_uid": obj["prediction_uid"],
+                "label": obj["label"],
+                "score": obj["score"],
+                "box": obj["box"]
+            } for obj in objects
+        ]
+
+
 @app.get("/health")
 def health():
     """
