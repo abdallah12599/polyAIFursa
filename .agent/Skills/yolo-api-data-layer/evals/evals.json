@@ -1,0 +1,66 @@
+{
+    "skill": "yolo-api-data-layer",
+    "description": "Evals for testing the YOLO FastAPI data-layer skill.",
+    "cases": [
+      {
+        "id": "refactor-to-sqlalchemy",
+        "prompt": "Refactor the YOLO API data layer from raw sqlite3 to SQLAlchemy ORM.",
+        "expected_output": "The agent creates a SQLAlchemy-based data layer, removes raw sqlite3 usage, keeps the existing API behavior unchanged, and all tests pass.",
+        "assertions": [
+          "SQLAlchemy is used instead of sqlite3",
+          "No raw SQL strings are used",
+          "Existing endpoints remain unchanged",
+          "Existing status codes remain unchanged",
+          "pytest tests pass"
+        ]
+      },
+      {
+        "id": "create-models-py",
+        "prompt": "Create a separate models.py file for the YOLO SQLAlchemy models.",
+        "expected_output": "The agent creates services/yolo/models.py and moves or defines SQLAlchemy ORM models there while keeping database setup in db.py.",
+        "assertions": [
+          "services/yolo/models.py exists",
+          "PredictionSession model exists in models.py",
+          "DetectionObject model exists in models.py",
+          "db.py keeps engine, SessionLocal, and get_db",
+          "app.py imports models correctly"
+        ]
+      },
+      {
+        "id": "use-fastapi-db-dependency",
+        "prompt": "Update all database-backed endpoints to use FastAPI dependency injection.",
+        "expected_output": "Every endpoint that reads or writes the database receives a SQLAlchemy Session using db: Session = Depends(get_db).",
+        "assertions": [
+          "Database endpoints use Depends(get_db)",
+          "No endpoint opens a raw database connection manually",
+          "SQLAlchemy Session is used for reads",
+          "SQLAlchemy Session is used for writes",
+          "API responses stay unchanged"
+        ]
+      },
+      {
+        "id": "support-sqlite-and-postgres",
+        "prompt": "Make the data layer support SQLite locally and PostgreSQL in production through environment variables.",
+        "expected_output": "The database URL is configurable using DATABASE_URL, defaults to SQLite, and can switch to PostgreSQL without code changes.",
+        "assertions": [
+          "DATABASE_URL is read from environment variables",
+          "SQLite is the default local database",
+          "PostgreSQL URL is supported",
+          "PostgreSQL credentials are not hardcoded",
+          "requirements.txt includes SQLAlchemy and PostgreSQL driver"
+        ]
+      },
+      {
+        "id": "api-tests-temp-db-mocked-yolo",
+        "prompt": "Update API tests to use a temporary SQLite database and mocked YOLO model.",
+        "expected_output": "Tests use temporary SQLite databases, override get_db, mock the YOLO model, and assert both status codes and response body structures.",
+        "assertions": [
+          "Tests use temporary SQLite database",
+          "Tests override get_db",
+          "Tests do not touch the real database",
+          "YOLO model is mocked",
+          "Tests assert status codes and response body structure"
+        ]
+      }
+    ]
+  }
