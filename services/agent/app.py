@@ -34,7 +34,9 @@ MODEL = os.environ.get("MODEL")
 # Text-only models
 ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
-    "anthropic:claude-haiku-4-5","google_genai:gemini-2.5-flash"
+    "anthropic:claude-haiku-4-5",
+    "google_genai:gemini-2.5-flash",
+    "bedrock_converse:amazon.nova-lite-v1:0",
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -255,8 +257,8 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
         response="I couldn't complete your request within the allowed number of steps. "
                  "Please try again or rephrase your question.",
         time_s=start,
-        iterations=iterations,
-        tools_called=tools_called,
+        iterations=iterations,       
+	tools_called=tools_called,
         context_limit_exceeded=context_limit_exceeded,
         tokens=tokens,
     )
@@ -276,13 +278,17 @@ def _build_result(response, time_s, iterations, tools_called, context_limit_exce
     )
 
 app = FastAPI(title="Vision Agent")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_methods=["POST", "GET"],
-    allow_headers=["Content-Type"],
+    allow_origins=[
+        "http://44.219.158.139:3000",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
 
 
 class ChatMessage(BaseModel):
