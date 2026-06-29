@@ -21,11 +21,20 @@ jobs:
           script: |
             cd ~/polyAIFursa
             git pull origin dev
-            source.venv/bin/activaye
+            source .venv/bin/activate
             pip install -r services/yolo/torch-requirements.txt
             pip install -r services/yolo/requirements.txt
+            pip install -r services/agent/requirements.txt
+            cd services/frontend
+            npm install
+            npm run build
+            cd ../..
             sudo systemctl restart yolo.service
+            sudo systemctl restart agent.service
+            sudo systemctl restart frontend.service
             sudo systemctl status yolo.service --no-pager
+            sudo systemctl status agent.service --no-pager
+            sudo systemctl status frontend.service --no-pager
 
   deploy-prod:
     if: github.ref == 'refs/heads/main'
@@ -41,8 +50,17 @@ jobs:
           script: |
             cd ~/polyAIFursa
             git pull origin main
-            source.venv/bin/activaye
+            source .venv/bin/activate
             pip install -r services/yolo/torch-requirements.txt
             pip install -r services/yolo/requirements.txt
+            pip install -r services/agent/requirements.txt
+            cd services/frontend
+            npm install
+            npm run build
+            cd ../..
             sudo systemctl restart yolo.service
+            sudo systemctl restart agent.service
+            sudo systemctl restart frontend.service
             sudo systemctl status yolo.service --no-pager
+            sudo systemctl status agent.service --no-pager
+            sudo systemctl status frontend.service --no-pager
