@@ -292,13 +292,13 @@ app.add_middleware(
 
 
 class ChatMessage(BaseModel):
-    role: str                           # "user" or "assistants
+    role: str                           # "user" or "assistants"
     content: str
     image_base64: Optional[str] = None  # only on user messages that carry an image
 
 
 class ChatRequest(BaseModel):
-    messages: list[ChatMessage]         # full conversation thread, oldest first
+    messages: list[ChatMessage]         #full conversation thread, oldest first
 
 
 @app.post("/chat", response_model=AgentResult)
