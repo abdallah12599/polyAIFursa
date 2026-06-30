@@ -292,7 +292,7 @@ app.add_middleware(
 
 
 class ChatMessage(BaseModel):
-    role: str                           # "user" or "assistant"
+    role: str                           # "user" or "assistants
     content: str
     image_base64: Optional[str] = None  # only on user messages that carry an image
 
@@ -325,7 +325,7 @@ def chat(request: ChatRequest):
     except Exception as exc:
         log.exception("Agent run failed")
         raise HTTPException(status_code=502, detail=f"Agent error: {exc}")
-    finally:
+        finally:
         _current_image_b64.reset(token)
 
 
