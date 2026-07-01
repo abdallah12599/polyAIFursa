@@ -133,7 +133,7 @@ def predict(request: PredictRequest, db: Session = Depends(get_db)):
 
         db.commit()
 
-    processing_time = round(time.time() - start_time, 2)
+    db.commit()
 
     return {
         "prediction_uid": uid,
@@ -270,6 +270,7 @@ def health():
     Health check endpoint
     """
     return {"status": "ok"}
+
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn

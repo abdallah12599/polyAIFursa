@@ -40,6 +40,13 @@ def test_get_prediction_by_uid(client, seed_session):
     assert response.status_code == 200
     data = response.json()
     assert data["uid"] == "uid-1"
+    assert set(data.keys()) == {
+        "uid",
+        "timestamp",
+        "original_image",
+        "predicted_image",
+        "detection_objects",
+    }
     assert len(data["detection_objects"]) == 1
     assert data["detection_objects"][0]["label"] == "person"
 
