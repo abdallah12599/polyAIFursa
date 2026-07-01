@@ -11,3 +11,7 @@ langchain[google-genai]
 
 httpx
 pydantic
+
+# Testing
+pytest>=7.0.0
+langchain-aws
