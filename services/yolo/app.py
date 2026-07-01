@@ -133,16 +133,16 @@ def predict(request: PredictRequest, db: Session = Depends(get_db)):
 
         db.commit()
 
-    processing_time = round(time.time() - start_time, 2)
+        processing_time = round(time.time() - start_time, 2)
 
-    return {
-        "prediction_uid": uid,
-        "detection_count": len(results[0].boxes),
-        "labels": detected_labels,
-        "time_took": processing_time,
-        "original_image_s3_key": request.image_s3_key,
-        "predicted_image_s3_key": predicted_image_s3_key,
-    }
+        return {
+            "prediction_uid": uid,
+            "detection_count": len(results[0].boxes),
+            "labels": detected_labels,
+            "time_took": processing_time,
+            "original_image_s3_key": request.image_s3_key,
+            "predicted_image_s3_key": predicted_image_s3_key,
+        }
 
 @app.get("/prediction/{uid}")
 def get_prediction_by_uid(uid: str, db: Session = Depends(get_db)):
