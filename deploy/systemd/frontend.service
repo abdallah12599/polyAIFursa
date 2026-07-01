@@ -1,0 +1,17 @@
+[Unit]
+Description=PolyAI Next.js frontend
+After=network.target agent.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/polyAIFursa/services/frontend
+Environment=NODE_ENV=production
+Environment=PORT=3000
+# Login shell so nvm-managed node/npm are on PATH
+ExecStart=/bin/bash -lc 'npm run start'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

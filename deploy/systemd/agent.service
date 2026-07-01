@@ -1,0 +1,16 @@
+[Unit]
+Description=PolyAI LangChain agent service
+After=network.target yolo.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/polyAIFursa/services/agent
+# app.py reads .env from the working directory via python-dotenv
+ExecStart=/home/ubuntu/polyAIFursa/.venv/bin/python app.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
