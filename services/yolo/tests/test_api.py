@@ -1,5 +1,4 @@
 import os
-import shutil
 
 TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
@@ -11,11 +10,10 @@ def test_health(client):
 
 
 def test_predict(client):
-    with open(TEST_IMAGE, "rb") as f:
-        response = client.post(
-            "/predict",
-            files={"file": ("beatles.jpeg", f, "image/jpeg")},
-        )
+    response = client.post(
+        "/predict",
+        json={"image_s3_key": "test/original/beatles.jpeg"},
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -23,6 +21,8 @@ def test_predict(client):
     assert "detection_count" in data
     assert "labels" in data
     assert "time_took" in data
+    assert data["original_image_s3_key"] == "test/original/beatles.jpeg"
+    assert data["predicted_image_s3_key"] == "test/predicted/beatles.jpeg"
     # The mocked model returns exactly one "person" detection.
     assert data["detection_count"] == 1
     assert data["labels"] == ["person"]
@@ -50,10 +50,8 @@ def test_get_prediction_by_uid_not_found(client):
     assert response.json()["detail"] == "Prediction not found"
 
 
-def test_get_prediction_image(client, seed_session, tmp_path):
-    image_path = str(tmp_path / "pred.jpg")
-    shutil.copy(TEST_IMAGE, image_path)
-    seed_session("uid-img", original="orig.jpg", predicted=image_path)
+def test_get_prediction_image(client, seed_session):
+    seed_session("uid-img", original="orig.jpg", predicted="pred.jpg")
 
     response = client.get("/prediction/uid-img/image")
     assert response.status_code == 200
@@ -66,8 +64,8 @@ def test_get_prediction_image_session_not_found(client):
 
 
 def test_get_prediction_image_file_missing(client, seed_session):
-    # Session exists, but the predicted image file is gone from disk.
-    seed_session("uid-nofile", original="orig.jpg", predicted="/no/such/pred.jpg")
+    # Session exists, but the predicted image object is missing from S3.
+    seed_session("uid-nofile", original="orig.jpg", predicted="missing-key.jpg")
 
     response = client.get("/prediction/uid-nofile/image")
     assert response.status_code == 404
