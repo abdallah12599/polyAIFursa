@@ -1,4 +1,6 @@
 import os
+import shutil
+from io import BytesIO
 
 import numpy as np
 import pytest
@@ -12,6 +14,9 @@ import app as yolo_app
 from app import app
 from db import Base, get_db
 from models import PredictionSession, DetectionObject
+
+
+TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 
 # --- Mocked YOLO model -------------------------------------------------------
@@ -56,6 +61,27 @@ class _FakeModel:
         return [_FakeResult([_FakeBox(0, 0.95, [1.0, 2.0, 3.0, 4.0])])]
 
 
+class _FakeS3Client:
+    def __init__(self):
+        self.objects = {}
+
+    def download_file(self, bucket, key, filename):
+        shutil.copy(TEST_IMAGE, filename)
+
+    def upload_file(self, filename, bucket, key):
+        with open(filename, "rb") as f:
+            self.objects[key] = f.read()
+
+    def get_object(self, Bucket, Key):
+        if Key == "missing-key.jpg":
+            raise FileNotFoundError(Key)
+        body = self.objects.get(Key)
+        if body is None:
+            with open(TEST_IMAGE, "rb") as f:
+                body = f.read()
+        return {"Body": BytesIO(body)}
+
+
 # --- Database / client fixtures ---------------------------------------------
 
 @pytest.fixture
@@ -78,6 +104,9 @@ def client(session_factory, monkeypatch):
 
     app.dependency_overrides[get_db] = override_get_db
     monkeypatch.setattr(yolo_app, "model", _FakeModel())
+    monkeypatch.setattr(yolo_app, "AWS_REGION", "us-east-1")
+    monkeypatch.setattr(yolo_app, "AWS_S3_BUCKET", "test-bucket")
+    monkeypatch.setattr(yolo_app, "s3_client", _FakeS3Client())
     yield TestClient(app)
     app.dependency_overrides.clear()
 

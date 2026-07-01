@@ -1,0 +1,79 @@
+{
+  "skill": "yolo-api-data-layer",
+  "description": "Evals for refactoring the YOLO FastAPI data layer from raw sqlite3 to SQLAlchemy ORM.",
+  "cases": [
+    {
+      "id": "refactor-existing-api-to-sqlalchemy",
+      "prompt": "Refactor services/yolo/app.py so the data layer uses SQLAlchemy ORM instead of raw sqlite3, without changing any existing API behavior, status codes, or response body structures.",
+      "expected_output": "A new services/yolo/db.py defines Base, engine, SessionLocal, get_db, and the PredictionSession and DetectionObject models. app.py no longer imports sqlite3; all endpoints that access the database use db: Session = Depends(get_db). Every existing endpoint returns the same JSON shape and status codes as before.",
+      "assertions": [
+        "services/yolo/db.py exists and defines Base, engine, SessionLocal, and get_db",
+        "No occurrence of 'import sqlite3' remains in services/yolo/",
+        "No raw SQL strings (CREATE TABLE, INSERT INTO, SELECT, DELETE) or conn.execute calls remain",
+        "Endpoints accessing the DB declare 'db: Session = Depends(get_db)'",
+        "GET /prediction/{uid} still returns 404 with detail 'Prediction not found' when missing",
+        "Response body keys (uid, timestamp, original_image, predicted_image, detection_objects) are unchanged"
+      ]
+    },
+    {
+      "id": "add-new-sqlalchemy-endpoint",
+      "prompt": "Add a new endpoint GET /predictions/count that returns the total number of prediction sessions, using SQLAlchemy and FastAPI dependency injection.",
+      "expected_output": "A new endpoint uses db: Session = Depends(get_db) and an ORM query (e.g. db.query(PredictionSession).count()) to return JSON like {\"count\": <int>}. No raw SQL is used, and existing endpoints are untouched.",
+      "assertions": [
+        "A GET /predictions/count endpoint is added",
+        "The endpoint signature includes 'db: Session = Depends(get_db)'",
+        "The count is computed via an ORM query, not a raw SQL string",
+        "The endpoint returns a JSON object containing a numeric 'count' field with status 200",
+        "Existing endpoints and their response shapes remain unchanged"
+      ]
+    },
+    {
+      "id": "add-new-sqlalchemy-model-table",
+      "prompt": "Add a new SQLAlchemy model and table named prediction_tags with columns id (integer primary key) and prediction_uid (foreign key to prediction_sessions.uid) and tag (text), wired into Base so it is created by init_db().",
+      "expected_output": "A new ORM model maps to a prediction_tags table with the requested columns and foreign key. The table is registered on Base.metadata and created via Base.metadata.create_all in init_db(). No raw CREATE TABLE statement is used.",
+      "assertions": [
+        "A new model class maps to __tablename__ = 'prediction_tags'",
+        "The model defines id, prediction_uid (ForeignKey to prediction_sessions.uid), and tag columns",
+        "The table is created through Base.metadata.create_all, not a raw CREATE TABLE string",
+        "No raw SQL is introduced for the new table"
+      ]
+    },
+    {
+      "id": "delete-prediction-with-sqlalchemy",
+      "prompt": "Add an endpoint DELETE /prediction/{uid} that deletes a prediction session and its detection objects using SQLAlchemy, returning 404 if the session does not exist.",
+      "expected_output": "The endpoint uses db: Session = Depends(get_db), loads the PredictionSession via an ORM query, deletes the related DetectionObject rows and the session through the ORM (db.delete / query.delete), commits, and raises HTTPException(status_code=404) when the uid is not found. No raw DELETE SQL is used.",
+      "assertions": [
+        "A DELETE /prediction/{uid} endpoint is added",
+        "The endpoint uses 'db: Session = Depends(get_db)'",
+        "Deletion is performed via ORM (db.delete or query.delete), not a raw DELETE statement",
+        "Detection objects related to the uid are also removed",
+        "Returns 404 when the prediction session does not exist",
+        "Returns a 2xx status on successful deletion"
+      ]
+    },
+    {
+      "id": "support-postgres-via-env",
+      "prompt": "Make the YOLO data layer support both SQLite for local development and PostgreSQL in production, configured entirely through environment variables.",
+      "expected_output": "The engine URL is read from a DATABASE_URL environment variable defaulting to a SQLite URL (sqlite:///./predictions.db). SQLite-only connect args (check_same_thread) are applied only for SQLite URLs. requirements.txt includes sqlalchemy and a PostgreSQL driver (psycopg2-binary). Switching DATABASE_URL to a postgresql:// URL requires no code changes.",
+      "assertions": [
+        "DATABASE_URL is read from os.environ with a SQLite default",
+        "check_same_thread connect arg is applied only for SQLite URLs",
+        "services/yolo/requirements.txt includes sqlalchemy and a PostgreSQL driver (e.g. psycopg2-binary)",
+        "No database credentials or engine URLs are hardcoded for PostgreSQL",
+        "Switching to a postgresql:// DATABASE_URL requires no source code changes"
+      ]
+    },
+    {
+      "id": "tests-use-temp-sqlite-and-mock-model",
+      "prompt": "Update services/yolo/tests so they use a temporary SQLite database and never touch the real database, and so any API test that triggers inference mocks the YOLO model and asserts both status codes and response body structures.",
+      "expected_output": "Tests create a temporary SQLite database (e.g. under tmp_path) and override the get_db dependency so the real predictions.db is never used. Tests that hit /predict mock the YOLO model instead of loading real weights, and assert both the HTTP status code and the JSON response body keys/structure.",
+      "assertions": [
+        "Tests build a temporary SQLite database (e.g. via tmp_path) and override get_db",
+        "The real predictions.db / production database is never used in tests",
+        "The YOLO model is mocked for inference-triggering tests (no real weights loaded)",
+        "API tests assert both the status code and the response body structure",
+        "pytest passes with the refactored SQLAlchemy data layer"
+      ]
+    }
+  ]
+}
