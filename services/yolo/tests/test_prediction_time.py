@@ -4,11 +4,10 @@ TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 
 def test_predict_includes_processing_time(client):
-    with open(TEST_IMAGE, "rb") as f:
-        response = client.post(
-            "/predict",
-            files={"file": ("beatles.jpeg", f, "image/jpeg")},
-        )
+    response = client.post(
+        "/predict",
+        json={"image_s3_key": "test/original/beatles.jpeg"},
+    )
 
     assert response.status_code == 200
     data = response.json()

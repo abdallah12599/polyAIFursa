@@ -1,9 +1,9 @@
 import base64
-import io
 import json
 import logging
 import os
 import time
+import uuid
 from contextvars import ContextVar
 from typing import Optional
 import time
@@ -19,6 +19,7 @@ logging.getLogger("langchain").setLevel(logging.DEBUG)
 logging.getLogger("langchain_core").setLevel(logging.DEBUG)
 log = logging.getLogger("agent")
 
+import boto3
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,10 +32,17 @@ from pydantic import BaseModel, Field
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
 MODEL = os.environ.get("MODEL")
 
+# S3 is used as the intermediary store between the agent and the YOLO service.
+# Bucket and region are never hard-coded; they come from the environment.
+AWS_REGION = os.environ.get("AWS_REGION")
+AWS_S3_BUCKET = os.environ.get("AWS_S3_BUCKET")
+
 # Text-only models
 ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
-    "anthropic:claude-haiku-4-5","google_genai:gemini-2.5-flash"
+    "anthropic:claude-haiku-4-5",
+    "google_genai:gemini-2.5-flash",
+    "bedrock_converse:amazon.nova-lite-v1:0",
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -79,6 +87,17 @@ class AgentResult(BaseModel):
     tokens_used: TokenUsage = Field(default_factory=TokenUsage)
 
 
+def _upload_original_image_to_s3(image_bytes: bytes, key: str) -> None:
+    """Upload the user's original image to S3 so YOLO can fetch it by key."""
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    s3.put_object(
+        Bucket=AWS_S3_BUCKET,
+        Key=key,
+        Body=image_bytes,
+        ContentType="image/jpeg",
+    )
+
+
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
@@ -86,25 +105,43 @@ def detect_objects() -> str:
     if not image_b64:
         return json.dumps({"error": "No image was provided by the user."})
 
-    image_bytes = base64.b64decode(image_b64)
-    with httpx.Client(timeout=30.0) as client:
-        predict_resp = client.post(
-            f"{YOLO_SERVICE_URL}/predict",
-            files={"file": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")},
-        )
-        predict_resp.raise_for_status()
-        data = predict_resp.json()
+    if not AWS_REGION or not AWS_S3_BUCKET:
+        return json.dumps({"error": "S3 is not configured. Set AWS_REGION and AWS_S3_BUCKET."})
 
-        # Fetch the annotated (bounding-box) image so the agent can return it.
-        uid = data.get("prediction_uid")
-        annotated_b64 = None
-        if uid:
-            try:
-                img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
-                img_resp.raise_for_status()
-                annotated_b64 = base64.b64encode(img_resp.content).decode("ascii")
-            except httpx.HTTPError as exc:
-                log.warning("Could not fetch annotated image for %s: %s", uid, exc)
+    image_bytes = base64.b64decode(image_b64)
+
+    # Upload the original image to S3 and hand YOLO only the object key.
+    prediction_id = str(uuid.uuid4())
+    image_s3_key = f"agent/{prediction_id}/original/image.jpg"
+
+    try:
+        _upload_original_image_to_s3(image_bytes, image_s3_key)
+    except Exception as exc:
+        log.exception("Failed to upload original image to S3")
+        return json.dumps({"error": f"Failed to upload image to S3: {exc}"})
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            predict_resp = client.post(
+                f"{YOLO_SERVICE_URL}/predict",
+                json={"image_s3_key": image_s3_key},
+            )
+            predict_resp.raise_for_status()
+            data = predict_resp.json()
+
+            # Fetch the annotated (bounding-box) image so the agent can return it.
+            uid = data.get("prediction_uid")
+            annotated_b64 = None
+            if uid:
+                try:
+                    img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
+                    img_resp.raise_for_status()
+                    annotated_b64 = base64.b64encode(img_resp.content).decode("ascii")
+                except httpx.HTTPError as exc:
+                    log.warning("Could not fetch annotated image for %s: %s", uid, exc)
+    except Exception as exc:
+        log.exception("YOLO prediction request failed")
+        return json.dumps({"error": f"YOLO prediction failed: {exc}"})
 
     # Keep image + id out of the LLM-visible text.
     _last_detection.set({"prediction_id": uid, "annotated_image": annotated_b64})
@@ -115,6 +152,8 @@ def detect_objects() -> str:
         "detection_count": data.get("detection_count"),
         "labels": data.get("labels"),
         "time_took": data.get("time_took"),
+        "original_image_s3_key": data.get("original_image_s3_key"),
+        "predicted_image_s3_key": data.get("predicted_image_s3_key"),
     })
 
 
@@ -255,8 +294,8 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
         response="I couldn't complete your request within the allowed number of steps. "
                  "Please try again or rephrase your question.",
         time_s=start,
-        iterations=iterations,
-        tools_called=tools_called,
+        iterations=iterations,       
+	tools_called=tools_called,
         context_limit_exceeded=context_limit_exceeded,
         tokens=tokens,
     )
@@ -276,23 +315,27 @@ def _build_result(response, time_s, iterations, tools_called, context_limit_exce
     )
 
 app = FastAPI(title="Vision Agent")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_methods=["POST", "GET"],
-    allow_headers=["Content-Type"],
+    allow_origins=[
+        "http://44.219.158.139:3000",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
+
 class ChatMessage(BaseModel):
-    role: str                           # "user" or "assistant"
+    role: str                           # "user" or "assistants"
     content: str
     image_base64: Optional[str] = None  # only on user messages that carry an image
 
 
 class ChatRequest(BaseModel):
-    messages: list[ChatMessage]         # full conversation thread, oldest first
+    messages: list[ChatMessage]         #full conversation thread, oldest first
 
 
 @app.post("/chat", response_model=AgentResult)

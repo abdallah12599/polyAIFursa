@@ -1,25 +1,24 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import Response
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ultralytics import YOLO
 from PIL import Image
+from dotenv import load_dotenv
+import boto3
 import logging
 import os
 import uuid
-import shutil
 import time
 import signal
+import tempfile
 
-from db import (
-    init_db,
-    get_db,
-    PredictionSession,
-    DetectionObject,
-)
+from db import get_db, init_db
+from models import PredictionSession, DetectionObject
 
 
+load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 def handle_shutdown(signum, frame):
     logging.info("Graceful shutdown requested. Cleaning up before exit...")
@@ -39,22 +38,18 @@ start_time = time.time()
 CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", 0.5))
 logging.info(f"CONFIDENCE_THRESHOLD set to {CONFIDENCE_THRESHOLD}")
 
-UPLOAD_DIR = "uploads/original"
-PREDICTED_DIR = "uploads/predicted"
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(PREDICTED_DIR, exist_ok=True)
+# S3 is the intermediary store shared with the agent service.
+# Bucket and region are never hard-coded; they come from the environment.
+AWS_REGION = os.environ.get("AWS_REGION")
+AWS_S3_BUCKET = os.environ.get("AWS_S3_BUCKET")
+s3_client = boto3.client("s3", region_name=AWS_REGION) if AWS_REGION else None
 
 # Download the AI model (tiny model ~6MB)
 model = YOLO("yolov8n.pt")  
 
 
-class PredictResponse(BaseModel):
-    """Validated shape of the /predict response."""
-    prediction_uid: str = Field(..., description="Unique id of this prediction session")
-    detection_count: int = Field(..., ge=0, description="Number of objects detected")
-    labels: list[str] = Field(default_factory=list, description="Detected object labels")
-    time_took: float = Field(..., ge=0, description="Inference time in seconds")
+class PredictRequest(BaseModel):
+    image_s3_key: str
 
 
 app = FastAPI()
@@ -65,68 +60,87 @@ Instrumentator().instrument(app).expose(app)
 init_db()
 
 
-def save_prediction_session(db: Session, uid, original_image, predicted_image):
+@app.post("/predict")
+def predict(request: PredictRequest, db: Session = Depends(get_db)):
     """
-    Save prediction session to database
-    """
-    db.add(PredictionSession(
-        uid=uid,
-        original_image=original_image,
-        predicted_image=predicted_image,
-    ))
+    Predict objects in an image stored in S3.
 
-def save_detection_object(db: Session, prediction_uid, label, score, box):
+    The agent uploads the original image to S3 and sends us only its object
+    key. We download it, run YOLO, upload the annotated image back to S3, and
+    store the S3 keys (not local paths) in the database.
     """
-    Save detection object to database
-    """
-    db.add(DetectionObject(
-        prediction_uid=prediction_uid,
-        label=label,
-        score=score,
-        box=str(box),
-    ))
+    if not AWS_REGION or not AWS_S3_BUCKET or s3_client is None:
+        raise HTTPException(
+            status_code=500,
+            detail="S3 is not configured (set AWS_REGION and AWS_S3_BUCKET).",
+        )
 
-@app.post("/predict", response_model=PredictResponse)
-def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """
-    Predict objects in an image
-    """
     start_time = time.time()
-    ext = os.path.splitext(file.filename)[1]
     uid = str(uuid.uuid4())
-    original_path = os.path.join(UPLOAD_DIR, uid + ext)
-    predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
+    ext = os.path.splitext(request.image_s3_key)[1] or ".jpg"
 
-    with open(original_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    with tempfile.TemporaryDirectory(prefix="yolo-") as temp_dir:
+        original_path = os.path.join(temp_dir, "original" + ext)
+        predicted_path = os.path.join(temp_dir, "predicted" + ext)
 
-    results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
+        # 1. Download the original image from S3 to a local temp file for YOLO.
+        try:
+            s3_client.download_file(AWS_S3_BUCKET, request.image_s3_key, original_path)
+        except Exception:
+            logging.exception("Failed to download original image from S3")
+            raise HTTPException(status_code=502, detail="Failed to download image from S3")
 
-    annotated_frame = results[0].plot()  # NumPy image with boxes
-    annotated_image = Image.fromarray(annotated_frame)
-    annotated_image.save(predicted_path)
+        results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
 
-    save_prediction_session(db, uid, original_path, predicted_path)
+        annotated_frame = results[0].plot()  # NumPy image with boxes
+        annotated_image = Image.fromarray(annotated_frame)
+        annotated_image.save(predicted_path)
 
-    detected_labels = []
-    for box in results[0].boxes:
-        label_idx = int(box.cls[0].item())
-        label = model.names[label_idx]
-        score = float(box.conf[0])
-        bbox = box.xyxy[0].tolist()
-        save_detection_object(db, uid, label, score, bbox)
-        detected_labels.append(label)
+        # 2. Upload the annotated image back to S3. Derive the predicted key from
+        #    the original key when possible, otherwise fall back to a uid-based key.
+        if "/original/" in request.image_s3_key:
+            predicted_image_s3_key = request.image_s3_key.replace("/original/", "/predicted/")
+        else:
+            predicted_image_s3_key = f"yolo/{uid}/predicted/image.jpg"
 
-    db.commit()
+        try:
+            s3_client.upload_file(predicted_path, AWS_S3_BUCKET, predicted_image_s3_key)
+        except Exception:
+            logging.exception("Failed to upload predicted image to S3")
+            raise HTTPException(status_code=502, detail="Failed to upload predicted image to S3")
 
-    processing_time = round(time.time() - start_time, 2)
+        # Store S3 keys (not local paths) so images are still available after
+        # the temporary local files are deleted.
+        db.add(PredictionSession(
+            uid=uid,
+            original_image=request.image_s3_key,
+            predicted_image=predicted_image_s3_key,
+        ))
 
-    return PredictResponse(
-        prediction_uid=uid,
-        detection_count=len(results[0].boxes),
-        labels=detected_labels,
-        time_took=processing_time,
-    )
+        detected_labels = []
+        for box in results[0].boxes:
+            label_idx = int(box.cls[0].item())
+            label = model.names[label_idx]
+            score = float(box.conf[0])
+            bbox = box.xyxy[0].tolist()
+            db.add(DetectionObject(
+                prediction_uid=uid,
+                label=label,
+                score=score,
+                box=str(bbox),
+            ))
+            detected_labels.append(label)
+
+        db.commit()
+
+        return {
+            "prediction_uid": uid,
+            "detection_count": len(results[0].boxes),
+            "labels": detected_labels,
+            "time_took": round(time.time() - start_time, 2),
+            "original_image_s3_key": request.image_s3_key,
+            "predicted_image_s3_key": predicted_image_s3_key,
+        }
 
 @app.get("/prediction/{uid}")
 def get_prediction_by_uid(uid: str, db: Session = Depends(get_db)):
@@ -137,11 +151,9 @@ def get_prediction_by_uid(uid: str, db: Session = Depends(get_db)):
     if not session:
         raise HTTPException(status_code=404, detail="Prediction not found")
 
-    objects = (
-        db.query(DetectionObject)
-        .filter(DetectionObject.prediction_uid == uid)
-        .all()
-    )
+    objects = db.query(DetectionObject).filter(
+        DetectionObject.prediction_uid == uid
+    ).all()
 
     return {
         "uid": session.uid,
@@ -162,12 +174,29 @@ def get_prediction_by_uid(uid: str, db: Session = Depends(get_db)):
 @app.get("/prediction/{uid}/image")
 def get_prediction_image(uid: str, db: Session = Depends(get_db)):
     """
-    Return the annotated (bounding-box) images r a prediction
+    Return the annotated (bounding-box) image for a prediction.
+
+    The annotated image lives in S3 (predicted_image holds the S3 key), so we
+    fetch it from S3 and stream the bytes back to the caller.
     """
+    if not AWS_REGION or not AWS_S3_BUCKET or s3_client is None:
+        raise HTTPException(
+            status_code=500,
+            detail="S3 is not configured (set AWS_REGION and AWS_S3_BUCKET).",
+        )
+
     session = db.query(PredictionSession).filter(PredictionSession.uid == uid).first()
-    if not session or not session.predicted_image or not os.path.exists(session.predicted_image):
+    if not session or not session.predicted_image:
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(session.predicted_image)
+
+    try:
+        obj = s3_client.get_object(Bucket=AWS_S3_BUCKET, Key=session.predicted_image)
+        image_bytes = obj["Body"].read()
+    except Exception:
+        logging.exception("Failed to fetch predicted image from S3")
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return Response(content=image_bytes, media_type="image/jpeg")
 
 
 @app.get("/predictions/label/{label}")
@@ -191,11 +220,9 @@ def get_predictions_by_label(label: str, db: Session = Depends(get_db)):
 
     results = []
     for session in sessions:
-        objects = (
-            db.query(DetectionObject)
-            .filter(DetectionObject.prediction_uid == session.uid)
-            .all()
-        )
+        objects = db.query(DetectionObject).filter(
+            DetectionObject.prediction_uid == session.uid
+        ).all()
         results.append({
             "uid": session.uid,
             "timestamp": session.timestamp,
@@ -220,11 +247,9 @@ def get_detections_by_score(min_score: float, db: Session = Depends(get_db)):
     if min_score < 0.0 or min_score > 1.0:
         raise HTTPException(status_code=400, detail="min_score must be between 0.0 and 1.0")
 
-    objects = (
-        db.query(DetectionObject)
-        .filter(DetectionObject.score >= min_score)
-        .all()
-    )
+    objects = db.query(DetectionObject).filter(
+        DetectionObject.score >= min_score
+    ).all()
 
     return [
         {
