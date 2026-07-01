@@ -5,17 +5,20 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ultralytics import YOLO
 from PIL import Image
+from dotenv import load_dotenv
 import boto3
 import logging
 import os
 import uuid
 import time
 import signal
+import tempfile
 
 from db import get_db, init_db
 from models import PredictionSession, DetectionObject
 
 
+load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 def handle_shutdown(signum, frame):
     logging.info("Graceful shutdown requested. Cleaning up before exit...")
@@ -34,12 +37,6 @@ start_time = time.time()
 # Override with: export CONFIDENCE_THRESHOLD=0.7
 CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", 0.5))
 logging.info(f"CONFIDENCE_THRESHOLD set to {CONFIDENCE_THRESHOLD}")
-
-UPLOAD_DIR = "uploads/original"
-PREDICTED_DIR = "uploads/predicted"
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(PREDICTED_DIR, exist_ok=True)
 
 # S3 is the intermediary store shared with the agent service.
 # Bucket and region are never hard-coded; they come from the environment.
@@ -81,57 +78,60 @@ def predict(request: PredictRequest, db: Session = Depends(get_db)):
     start_time = time.time()
     uid = str(uuid.uuid4())
     ext = os.path.splitext(request.image_s3_key)[1] or ".jpg"
-    original_path = os.path.join(UPLOAD_DIR, uid + ext)
-    predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
 
-    # 1. Download the original image from S3 to a local file for YOLO.
-    try:
-        s3_client.download_file(AWS_S3_BUCKET, request.image_s3_key, original_path)
-    except Exception:
-        logging.exception("Failed to download original image from S3")
-        raise HTTPException(status_code=502, detail="Failed to download image from S3")
+    with tempfile.TemporaryDirectory(prefix="yolo-") as temp_dir:
+        original_path = os.path.join(temp_dir, "original" + ext)
+        predicted_path = os.path.join(temp_dir, "predicted" + ext)
 
-    results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
+        # 1. Download the original image from S3 to a local temp file for YOLO.
+        try:
+            s3_client.download_file(AWS_S3_BUCKET, request.image_s3_key, original_path)
+        except Exception:
+            logging.exception("Failed to download original image from S3")
+            raise HTTPException(status_code=502, detail="Failed to download image from S3")
 
-    annotated_frame = results[0].plot()  # NumPy image with boxes
-    annotated_image = Image.fromarray(annotated_frame)
-    annotated_image.save(predicted_path)
+        results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
 
-    # 2. Upload the annotated image back to S3. Derive the predicted key from
-    #    the original key when possible, otherwise fall back to a uid-based key.
-    if "/original/" in request.image_s3_key:
-        predicted_image_s3_key = request.image_s3_key.replace("/original/", "/predicted/")
-    else:
-        predicted_image_s3_key = f"yolo/{uid}/predicted/image.jpg"
+        annotated_frame = results[0].plot()  # NumPy image with boxes
+        annotated_image = Image.fromarray(annotated_frame)
+        annotated_image.save(predicted_path)
 
-    try:
-        s3_client.upload_file(predicted_path, AWS_S3_BUCKET, predicted_image_s3_key)
-    except Exception:
-        logging.exception("Failed to upload predicted image to S3")
-        raise HTTPException(status_code=502, detail="Failed to upload predicted image to S3")
+        # 2. Upload the annotated image back to S3. Derive the predicted key from
+        #    the original key when possible, otherwise fall back to a uid-based key.
+        if "/original/" in request.image_s3_key:
+            predicted_image_s3_key = request.image_s3_key.replace("/original/", "/predicted/")
+        else:
+            predicted_image_s3_key = f"yolo/{uid}/predicted/image.jpg"
 
-    # Store S3 keys (not local paths) so the images can be served later.
-    db.add(PredictionSession(
-        uid=uid,
-        original_image=request.image_s3_key,
-        predicted_image=predicted_image_s3_key,
-    ))
+        try:
+            s3_client.upload_file(predicted_path, AWS_S3_BUCKET, predicted_image_s3_key)
+        except Exception:
+            logging.exception("Failed to upload predicted image to S3")
+            raise HTTPException(status_code=502, detail="Failed to upload predicted image to S3")
 
-    detected_labels = []
-    for box in results[0].boxes:
-        label_idx = int(box.cls[0].item())
-        label = model.names[label_idx]
-        score = float(box.conf[0])
-        bbox = box.xyxy[0].tolist()
-        db.add(DetectionObject(
-            prediction_uid=uid,
-            label=label,
-            score=score,
-            box=str(bbox),
+        # Store S3 keys (not local paths) so images are still available after
+        # the temporary local files are deleted.
+        db.add(PredictionSession(
+            uid=uid,
+            original_image=request.image_s3_key,
+            predicted_image=predicted_image_s3_key,
         ))
-        detected_labels.append(label)
 
-    db.commit()
+        detected_labels = []
+        for box in results[0].boxes:
+            label_idx = int(box.cls[0].item())
+            label = model.names[label_idx]
+            score = float(box.conf[0])
+            bbox = box.xyxy[0].tolist()
+            db.add(DetectionObject(
+                prediction_uid=uid,
+                label=label,
+                score=score,
+                box=str(bbox),
+            ))
+            detected_labels.append(label)
+
+        db.commit()
 
     processing_time = round(time.time() - start_time, 2)
 
