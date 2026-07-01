@@ -1,12 +1,11 @@
 import base64
-import io
 import json
 import logging
 import os
 import time
+import uuid
 from contextvars import ContextVar
 from typing import Optional
-import time
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -19,6 +18,7 @@ logging.getLogger("langchain").setLevel(logging.DEBUG)
 logging.getLogger("langchain_core").setLevel(logging.DEBUG)
 log = logging.getLogger("agent")
 
+import boto3
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +30,11 @@ from pydantic import BaseModel, Field
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
 MODEL = os.environ.get("MODEL")
+
+# S3 is used as the intermediary store between the agent and the YOLO service.
+# Bucket and region are never hard-coded; they come from the environment.
+AWS_REGION = os.environ.get("AWS_REGION")
+AWS_S3_BUCKET = os.environ.get("AWS_S3_BUCKET")
 
 # Text-only models
 ALLOWED_MODELS = {
@@ -81,6 +86,17 @@ class AgentResult(BaseModel):
     tokens_used: TokenUsage = Field(default_factory=TokenUsage)
 
 
+def _upload_original_image_to_s3(image_bytes: bytes, key: str) -> None:
+    """Upload the user's original image to S3 so YOLO can fetch it by key."""
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    s3.put_object(
+        Bucket=AWS_S3_BUCKET,
+        Key=key,
+        Body=image_bytes,
+        ContentType="image/jpeg",
+    )
+
+
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
@@ -88,25 +104,43 @@ def detect_objects() -> str:
     if not image_b64:
         return json.dumps({"error": "No image was provided by the user."})
 
-    image_bytes = base64.b64decode(image_b64)
-    with httpx.Client(timeout=30.0) as client:
-        predict_resp = client.post(
-            f"{YOLO_SERVICE_URL}/predict",
-            files={"file": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")},
-        )
-        predict_resp.raise_for_status()
-        data = predict_resp.json()
+    if not AWS_REGION or not AWS_S3_BUCKET:
+        return json.dumps({"error": "S3 is not configured. Set AWS_REGION and AWS_S3_BUCKET."})
 
-        # Fetch the annotated (bounding-box) image so the agent can return it.
-        uid = data.get("prediction_uid")
-        annotated_b64 = None
-        if uid:
-            try:
-                img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
-                img_resp.raise_for_status()
-                annotated_b64 = base64.b64encode(img_resp.content).decode("ascii")
-            except httpx.HTTPError as exc:
-                log.warning("Could not fetch annotated image for %s: %s", uid, exc)
+    image_bytes = base64.b64decode(image_b64)
+
+    # Upload the original image to S3 and hand YOLO only the object key.
+    prediction_id = str(uuid.uuid4())
+    image_s3_key = f"agent/{prediction_id}/original/image.jpg"
+
+    try:
+        _upload_original_image_to_s3(image_bytes, image_s3_key)
+    except Exception as exc:
+        log.exception("Failed to upload original image to S3")
+        return json.dumps({"error": f"Failed to upload image to S3: {exc}"})
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            predict_resp = client.post(
+                f"{YOLO_SERVICE_URL}/predict",
+                json={"image_s3_key": image_s3_key},
+            )
+            predict_resp.raise_for_status()
+            data = predict_resp.json()
+
+            # Fetch the annotated (bounding-box) image so the agent can return it.
+            uid = data.get("prediction_uid")
+            annotated_b64 = None
+            if uid:
+                try:
+                    img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
+                    img_resp.raise_for_status()
+                    annotated_b64 = base64.b64encode(img_resp.content).decode("ascii")
+                except httpx.HTTPError as exc:
+                    log.warning("Could not fetch annotated image for %s: %s", uid, exc)
+    except Exception as exc:
+        log.exception("YOLO prediction request failed")
+        return json.dumps({"error": f"YOLO prediction failed: {exc}"})
 
     # Keep image + id out of the LLM-visible text.
     _last_detection.set({"prediction_id": uid, "annotated_image": annotated_b64})
@@ -117,6 +151,8 @@ def detect_objects() -> str:
         "detection_count": data.get("detection_count"),
         "labels": data.get("labels"),
         "time_took": data.get("time_took"),
+        "original_image_s3_key": data.get("original_image_s3_key"),
+        "predicted_image_s3_key": data.get("predicted_image_s3_key"),
     })
 
 
@@ -325,7 +361,7 @@ def chat(request: ChatRequest):
     except Exception as exc:
         log.exception("Agent run failed")
         raise HTTPException(status_code=502, detail=f"Agent error: {exc}")
-        finally:
+    finally:
         _current_image_b64.reset(token)
 
 

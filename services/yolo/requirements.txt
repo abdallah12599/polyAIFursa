@@ -20,6 +20,9 @@ prometheus-fastapi-instrumentator>=6.0.0
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.0
 
+# AWS SDK (S3 as the intermediary image store between agent and yolo)
+boto3>=1.34.0
+
 # Testing
 pytest>=7.0.0
 pytest-cov>=4.0.0

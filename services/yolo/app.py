@@ -1,13 +1,14 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import Response
 from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ultralytics import YOLO
 from PIL import Image
+import boto3
 import logging
 import os
 import uuid
-import shutil
 import time
 import signal
 
@@ -40,8 +41,18 @@ PREDICTED_DIR = "uploads/predicted"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PREDICTED_DIR, exist_ok=True)
 
+# S3 is the intermediary store shared with the agent service.
+# Bucket and region are never hard-coded; they come from the environment.
+AWS_REGION = os.environ.get("AWS_REGION")
+AWS_S3_BUCKET = os.environ.get("AWS_S3_BUCKET")
+s3_client = boto3.client("s3", region_name=AWS_REGION) if AWS_REGION else None
+
 # Download the AI model (tiny model ~6MB)
 model = YOLO("yolov8n.pt")  
+
+
+class PredictRequest(BaseModel):
+    image_s3_key: str
 
 
 app = FastAPI()
@@ -53,18 +64,32 @@ init_db()
 
 
 @app.post("/predict")
-def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
+def predict(request: PredictRequest, db: Session = Depends(get_db)):
     """
-    Predict objects in an image
+    Predict objects in an image stored in S3.
+
+    The agent uploads the original image to S3 and sends us only its object
+    key. We download it, run YOLO, upload the annotated image back to S3, and
+    store the S3 keys (not local paths) in the database.
     """
+    if not AWS_REGION or not AWS_S3_BUCKET or s3_client is None:
+        raise HTTPException(
+            status_code=500,
+            detail="S3 is not configured (set AWS_REGION and AWS_S3_BUCKET).",
+        )
+
     start_time = time.time()
-    ext = os.path.splitext(file.filename)[1]
     uid = str(uuid.uuid4())
+    ext = os.path.splitext(request.image_s3_key)[1] or ".jpg"
     original_path = os.path.join(UPLOAD_DIR, uid + ext)
     predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
 
-    with open(original_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    # 1. Download the original image from S3 to a local file for YOLO.
+    try:
+        s3_client.download_file(AWS_S3_BUCKET, request.image_s3_key, original_path)
+    except Exception:
+        logging.exception("Failed to download original image from S3")
+        raise HTTPException(status_code=502, detail="Failed to download image from S3")
 
     results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
 
@@ -72,10 +97,24 @@ def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
     annotated_image = Image.fromarray(annotated_frame)
     annotated_image.save(predicted_path)
 
+    # 2. Upload the annotated image back to S3. Derive the predicted key from
+    #    the original key when possible, otherwise fall back to a uid-based key.
+    if "/original/" in request.image_s3_key:
+        predicted_image_s3_key = request.image_s3_key.replace("/original/", "/predicted/")
+    else:
+        predicted_image_s3_key = f"yolo/{uid}/predicted/image.jpg"
+
+    try:
+        s3_client.upload_file(predicted_path, AWS_S3_BUCKET, predicted_image_s3_key)
+    except Exception:
+        logging.exception("Failed to upload predicted image to S3")
+        raise HTTPException(status_code=502, detail="Failed to upload predicted image to S3")
+
+    # Store S3 keys (not local paths) so the images can be served later.
     db.add(PredictionSession(
         uid=uid,
-        original_image=original_path,
-        predicted_image=predicted_path,
+        original_image=request.image_s3_key,
+        predicted_image=predicted_image_s3_key,
     ))
 
     detected_labels = []
@@ -97,11 +136,12 @@ def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
     processing_time = round(time.time() - start_time, 2)
 
     return {
-        "prediction_uid": uid, 
+        "prediction_uid": uid,
         "detection_count": len(results[0].boxes),
         "labels": detected_labels,
-        "time_took": processing_time
-
+        "time_took": processing_time,
+        "original_image_s3_key": request.image_s3_key,
+        "predicted_image_s3_key": predicted_image_s3_key,
     }
 
 @app.get("/prediction/{uid}")
@@ -136,12 +176,29 @@ def get_prediction_by_uid(uid: str, db: Session = Depends(get_db)):
 @app.get("/prediction/{uid}/image")
 def get_prediction_image(uid: str, db: Session = Depends(get_db)):
     """
-    Return the annotated (bounding-box) images r a prediction
+    Return the annotated (bounding-box) image for a prediction.
+
+    The annotated image lives in S3 (predicted_image holds the S3 key), so we
+    fetch it from S3 and stream the bytes back to the caller.
     """
+    if not AWS_REGION or not AWS_S3_BUCKET or s3_client is None:
+        raise HTTPException(
+            status_code=500,
+            detail="S3 is not configured (set AWS_REGION and AWS_S3_BUCKET).",
+        )
+
     session = db.query(PredictionSession).filter(PredictionSession.uid == uid).first()
-    if not session or not os.path.exists(session.predicted_image):
+    if not session or not session.predicted_image:
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(session.predicted_image)
+
+    try:
+        obj = s3_client.get_object(Bucket=AWS_S3_BUCKET, Key=session.predicted_image)
+        image_bytes = obj["Body"].read()
+    except Exception:
+        logging.exception("Failed to fetch predicted image from S3")
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return Response(content=image_bytes, media_type="image/jpeg")
 
 
 @app.get("/predictions/label/{label}")
